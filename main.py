@@ -1,29 +1,25 @@
 import os
 import json
 import asyncpg
+import bcrypt
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
-from passlib.context import CryptContext
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
-from typing import Optional, List
 
-# ---- настройки ----
 SECRET_KEY = os.environ["SECRET_KEY"]
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 1 неделя
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
-# ---- вспомогательные функции ----
 def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
+    return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
 
 def get_password_hash(password):
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
 def create_access_token(data: dict):
     to_encode = data.copy()
@@ -43,7 +39,6 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-# ---- создание таблиц ----
 CREATE_TABLES = """
 CREATE TABLE IF NOT EXISTS users (
     login TEXT PRIMARY KEY,
@@ -83,12 +78,10 @@ CREATE TABLE IF NOT EXISTS test_results (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: создаём пул и таблицы
     app.state.pool = await asyncpg.create_pool(os.environ["DATABASE_URL"])
     async with app.state.pool.acquire() as conn:
         await conn.execute(CREATE_TABLES)
     yield
-    # Shutdown
     await app.state.pool.close()
 
 app = FastAPI(lifespan=lifespan)
@@ -100,13 +93,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---- эндпоинты ----
-
 @app.get("/")
 async def root():
     return {"message": "Quiz API"}
 
-# Регистрация
 @app.post("/register")
 async def register(body: dict):
     login = body["login"]
@@ -130,7 +120,6 @@ async def register(body: dict):
     token = create_access_token({"sub": login, "role": role})
     return {"token": token, "role": role}
 
-# Вход
 @app.post("/login")
 async def login(body: dict):
     login = body["login"]
@@ -142,14 +131,12 @@ async def login(body: dict):
     token = create_access_token({"sub": login, "role": user["role"]})
     return {"token": token, "role": user["role"]}
 
-# Получить профиль
 @app.get("/profile")
 async def get_profile(current_user = Depends(get_current_user)):
     async with app.state.pool.acquire() as conn:
         user = await conn.fetchrow("SELECT * FROM users WHERE login = $1", current_user["login"])
         return dict(user) if user else {}
 
-# Обновить профиль
 @app.put("/profile")
 async def update_profile(body: dict, current_user = Depends(get_current_user)):
     async with app.state.pool.acquire() as conn:
@@ -160,7 +147,6 @@ async def update_profile(body: dict, current_user = Depends(get_current_user)):
         )
     return {"status": "ok"}
 
-# Создать или обновить тест (teacher only)
 @app.post("/tests")
 async def create_test(body: dict, current_user = Depends(get_current_user)):
     if current_user["role"] != "teacher":
@@ -169,17 +155,12 @@ async def create_test(body: dict, current_user = Depends(get_current_user)):
     time_limit = body.get("timeLimitMinutes", 0)
     questions = body["questions"]
     async with app.state.pool.acquire() as conn:
-        # Проверяем, существует ли уже тест с таким ID
         existing = await conn.fetchrow("SELECT id FROM tests WHERE id = $1", test_id)
         if existing:
-            # Обновляем существующий тест
             await conn.execute("UPDATE tests SET time_limit_minutes = $1 WHERE id = $2", time_limit, test_id)
-            # Удаляем старые вопросы и вставляем новые
             await conn.execute("DELETE FROM questions WHERE test_id = $1", test_id)
         else:
-            # Создаём новый тест
             await conn.execute("INSERT INTO tests (id, time_limit_minutes) VALUES ($1, $2)", test_id, time_limit)
-
         for q in questions:
             await conn.execute(
                 "INSERT INTO questions (test_id, text, options, correct_index, multiple, correct_indices) "
@@ -189,7 +170,6 @@ async def create_test(body: dict, current_user = Depends(get_current_user)):
             )
     return {"id": test_id}
 
-# Получить тесты преподавателя
 @app.get("/tests")
 async def get_tests(current_user = Depends(get_current_user)):
     if current_user["role"] != "teacher":
@@ -215,7 +195,6 @@ async def get_tests(current_user = Depends(get_current_user)):
             })
         return tests
 
-# Получить один тест по ID (для студента)
 @app.get("/tests/{test_id}")
 async def get_test(test_id: str, current_user = Depends(get_current_user)):
     if current_user["role"] != "student":
@@ -236,7 +215,6 @@ async def get_test(test_id: str, current_user = Depends(get_current_user)):
             })
         return {"id": test_row["id"], "timeLimitMinutes": test_row["time_limit_minutes"], "questions": questions}
 
-# Сохранить результат студента
 @app.post("/tests/{test_id}/results")
 async def save_result(test_id: str, body: dict, current_user = Depends(get_current_user)):
     if current_user["role"] != "student":
@@ -250,7 +228,6 @@ async def save_result(test_id: str, body: dict, current_user = Depends(get_curre
         )
     return {"status": "ok"}
 
-# Получить результаты по тесту (для teacher)
 @app.get("/tests/{test_id}/results")
 async def get_results(test_id: str, current_user = Depends(get_current_user)):
     if current_user["role"] != "teacher":
@@ -268,7 +245,6 @@ async def get_results(test_id: str, current_user = Depends(get_current_user)):
             })
         return results
 
-# История студента
 @app.get("/my-results")
 async def get_my_results(current_user = Depends(get_current_user)):
     async with app.state.pool.acquire() as conn:
