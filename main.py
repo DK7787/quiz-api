@@ -160,7 +160,7 @@ async def update_profile(body: dict, current_user = Depends(get_current_user)):
         )
     return {"status": "ok"}
 
-# Создать тест (teacher only)
+# Создать или обновить тест (teacher only)
 @app.post("/tests")
 async def create_test(body: dict, current_user = Depends(get_current_user)):
     if current_user["role"] != "teacher":
@@ -169,7 +169,17 @@ async def create_test(body: dict, current_user = Depends(get_current_user)):
     time_limit = body.get("timeLimitMinutes", 0)
     questions = body["questions"]
     async with app.state.pool.acquire() as conn:
-        await conn.execute("INSERT INTO tests (id, time_limit_minutes) VALUES ($1, $2)", test_id, time_limit)
+        # Проверяем, существует ли уже тест с таким ID
+        existing = await conn.fetchrow("SELECT id FROM tests WHERE id = $1", test_id)
+        if existing:
+            # Обновляем существующий тест
+            await conn.execute("UPDATE tests SET time_limit_minutes = $1 WHERE id = $2", time_limit, test_id)
+            # Удаляем старые вопросы и вставляем новые
+            await conn.execute("DELETE FROM questions WHERE test_id = $1", test_id)
+        else:
+            # Создаём новый тест
+            await conn.execute("INSERT INTO tests (id, time_limit_minutes) VALUES ($1, $2)", test_id, time_limit)
+
         for q in questions:
             await conn.execute(
                 "INSERT INTO questions (test_id, text, options, correct_index, multiple, correct_indices) "
@@ -179,7 +189,7 @@ async def create_test(body: dict, current_user = Depends(get_current_user)):
             )
     return {"id": test_id}
 
-# Получить тесты преподавателя (или все тесты для проверки существования)
+# Получить тесты преподавателя
 @app.get("/tests")
 async def get_tests(current_user = Depends(get_current_user)):
     if current_user["role"] != "teacher":
