@@ -9,14 +9,12 @@ from contextlib import asynccontextmanager
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
 
-# ---- настройки ----
 SECRET_KEY = os.environ["SECRET_KEY"]
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 1 неделя
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 
 security = HTTPBearer()
 
-# ---- хеширование паролей (только bcrypt) ----
 def verify_password(plain_password, hashed_password):
     return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
 
@@ -41,7 +39,6 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-# ---- создание таблиц (добавлено поле student_name) ----
 CREATE_TABLES = """
 CREATE TABLE IF NOT EXISTS users (
     login TEXT PRIMARY KEY,
@@ -72,12 +69,14 @@ CREATE TABLE IF NOT EXISTS questions (
 CREATE TABLE IF NOT EXISTS test_results (
     id SERIAL PRIMARY KEY,
     student_login TEXT,
-    student_name TEXT,
     test_id TEXT REFERENCES tests(id) ON DELETE CASCADE,
     answers JSONB NOT NULL DEFAULT '[]',
     percent INTEGER DEFAULT 0,
     completion_time_millis BIGINT DEFAULT 0
 );
+
+-- Миграция: добавляем столбец student_name, если его ещё нет
+ALTER TABLE test_results ADD COLUMN IF NOT EXISTS student_name TEXT;
 """
 
 @asynccontextmanager
@@ -101,7 +100,6 @@ app.add_middleware(
 async def root():
     return {"message": "Quiz API"}
 
-# Регистрация
 @app.post("/register")
 async def register(body: dict):
     login = body["login"]
@@ -125,7 +123,6 @@ async def register(body: dict):
     token = create_access_token({"sub": login, "role": role})
     return {"token": token, "role": role}
 
-# Вход
 @app.post("/login")
 async def login(body: dict):
     login = body["login"]
@@ -137,14 +134,12 @@ async def login(body: dict):
     token = create_access_token({"sub": login, "role": user["role"]})
     return {"token": token, "role": user["role"]}
 
-# Получить профиль
 @app.get("/profile")
 async def get_profile(current_user = Depends(get_current_user)):
     async with app.state.pool.acquire() as conn:
         user = await conn.fetchrow("SELECT * FROM users WHERE login = $1", current_user["login"])
         return dict(user) if user else {}
 
-# Обновить профиль
 @app.put("/profile")
 async def update_profile(body: dict, current_user = Depends(get_current_user)):
     async with app.state.pool.acquire() as conn:
@@ -155,7 +150,6 @@ async def update_profile(body: dict, current_user = Depends(get_current_user)):
         )
     return {"status": "ok"}
 
-# Создать или обновить тест (teacher only)
 @app.post("/tests")
 async def create_test(body: dict, current_user = Depends(get_current_user)):
     if current_user["role"] != "teacher":
@@ -179,7 +173,6 @@ async def create_test(body: dict, current_user = Depends(get_current_user)):
             )
     return {"id": test_id}
 
-# Получить тесты преподавателя
 @app.get("/tests")
 async def get_tests(current_user = Depends(get_current_user)):
     if current_user["role"] != "teacher":
@@ -205,10 +198,8 @@ async def get_tests(current_user = Depends(get_current_user)):
             })
         return tests
 
-# Получить один тест по ID (доступен и teacher, и student)
 @app.get("/tests/{test_id}")
 async def get_test(test_id: str, current_user = Depends(get_current_user)):
-    # роль не проверяем, чтобы преподаватель мог редактировать
     async with app.state.pool.acquire() as conn:
         test_row = await conn.fetchrow("SELECT * FROM tests WHERE id = $1", test_id)
         if not test_row:
@@ -225,13 +216,11 @@ async def get_test(test_id: str, current_user = Depends(get_current_user)):
             })
         return {"id": test_row["id"], "timeLimitMinutes": test_row["time_limit_minutes"], "questions": questions}
 
-# Сохранить результат студента (теперь сохраняем ФИО)
 @app.post("/tests/{test_id}/results")
 async def save_result(test_id: str, body: dict, current_user = Depends(get_current_user)):
     if current_user["role"] != "student":
         raise HTTPException(status_code=403, detail="Only student")
     async with app.state.pool.acquire() as conn:
-        # получаем ФИО студента
         student = await conn.fetchrow("SELECT last_name, first_name, middle_name FROM users WHERE login = $1", current_user["login"])
         student_name = ""
         if student:
@@ -246,7 +235,6 @@ async def save_result(test_id: str, body: dict, current_user = Depends(get_curre
         )
     return {"status": "ok"}
 
-# Получить результаты по тесту (для teacher)
 @app.get("/tests/{test_id}/results")
 async def get_results(test_id: str, current_user = Depends(get_current_user)):
     if current_user["role"] != "teacher":
@@ -265,7 +253,6 @@ async def get_results(test_id: str, current_user = Depends(get_current_user)):
             })
         return results
 
-# История студента
 @app.get("/my-results")
 async def get_my_results(current_user = Depends(get_current_user)):
     async with app.state.pool.acquire() as conn:
