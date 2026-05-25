@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS tests (
     id TEXT PRIMARY KEY,
-    time_limit_minutes INTEGER DEFAULT 0
+    time_limit_minutes INTEGER DEFAULT 0,
+    teacher_login TEXT
 );
 
 CREATE TABLE IF NOT EXISTS questions (
@@ -69,14 +70,15 @@ CREATE TABLE IF NOT EXISTS questions (
 CREATE TABLE IF NOT EXISTS test_results (
     id SERIAL PRIMARY KEY,
     student_login TEXT,
+    student_name TEXT,
     test_id TEXT REFERENCES tests(id) ON DELETE CASCADE,
     answers JSONB NOT NULL DEFAULT '[]',
     percent INTEGER DEFAULT 0,
     completion_time_millis BIGINT DEFAULT 0
 );
 
--- Миграция: добавляем столбец student_name, если его ещё нет
-ALTER TABLE test_results ADD COLUMN IF NOT EXISTS student_name TEXT;
+-- Добавляем колонку teacher_login, если её ещё нет (для миграции старых баз)
+ALTER TABLE tests ADD COLUMN IF NOT EXISTS teacher_login TEXT;
 """
 
 @asynccontextmanager
@@ -84,6 +86,8 @@ async def lifespan(app: FastAPI):
     app.state.pool = await asyncpg.create_pool(os.environ["DATABASE_URL"])
     async with app.state.pool.acquire() as conn:
         await conn.execute(CREATE_TABLES)
+        # Если остались тесты без владельца, привязываем их к первому преподавателю (необязательно)
+        await conn.execute("UPDATE tests SET teacher_login = '123' WHERE teacher_login IS NULL;")
     yield
     await app.state.pool.close()
 
@@ -163,7 +167,10 @@ async def create_test(body: dict, current_user = Depends(get_current_user)):
             await conn.execute("UPDATE tests SET time_limit_minutes = $1 WHERE id = $2", time_limit, test_id)
             await conn.execute("DELETE FROM questions WHERE test_id = $1", test_id)
         else:
-            await conn.execute("INSERT INTO tests (id, time_limit_minutes) VALUES ($1, $2)", test_id, time_limit)
+            await conn.execute(
+                "INSERT INTO tests (id, time_limit_minutes, teacher_login) VALUES ($1, $2, $3)",
+                test_id, time_limit, current_user["login"]
+            )
         for q in questions:
             await conn.execute(
                 "INSERT INTO questions (test_id, text, options, correct_index, multiple, correct_indices) "
@@ -178,7 +185,11 @@ async def get_tests(current_user = Depends(get_current_user)):
     if current_user["role"] != "teacher":
         raise HTTPException(status_code=403, detail="Only teacher")
     async with app.state.pool.acquire() as conn:
-        rows = await conn.fetch("SELECT id, time_limit_minutes FROM tests")
+        # Возвращаем только тесты текущего преподавателя (и старые без teacher_login, если есть)
+        rows = await conn.fetch(
+            "SELECT id, time_limit_minutes FROM tests WHERE teacher_login = $1 OR teacher_login IS NULL",
+            current_user["login"]
+        )
         tests = []
         for row in rows:
             q_rows = await conn.fetch("SELECT * FROM questions WHERE test_id = $1", row["id"])
